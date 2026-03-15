@@ -1,34 +1,123 @@
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, Response, render_template_string, request
+from flask_compress import Compress
 import json
 import os
+import hashlib
+import boto3
 
 app = Flask(__name__)
+Compress(app)
 
 BASE = os.path.dirname(__file__)
-BOUNDARY_FILES = (
-    "data/boundaries/can_scored.geojson",
-    "data/boundaries/chn_scored.geojson",
-    "data/boundaries/mex_scored.geojson",
-)
+LOCAL_MERGED_PATH = "data/boundaries/current/l2_scored_merged.geojson"
+LOCAL_MANIFEST_PATH = "data/boundaries/current/l2_scored_manifest.json"
 
 _cache = {}
 
-def load_geojson(path):
-    if path not in _cache:
-        with open(os.path.join(BASE, path)) as f:
-            _cache[path] = json.load(f)
-    return _cache[path]
-
-
-def load_scored_boundaries():
-    cache_key = "scored_boundaries_merged"
+def load_json_from_path(path):
+    cache_key = f"local_json:{path}"
     if cache_key not in _cache:
-        merged_features = []
-        for path in BOUNDARY_FILES:
-            geojson = load_geojson(path)
-            merged_features.extend(geojson.get("features", []))
-        _cache[cache_key] = {"type": "FeatureCollection", "features": merged_features}
+        with open(os.path.join(BASE, path), encoding="utf-8") as f:
+            _cache[cache_key] = json.load(f)
     return _cache[cache_key]
+
+
+def load_text_from_path(path):
+    cache_key = f"local_text:{path}"
+    if cache_key not in _cache:
+        with open(os.path.join(BASE, path), encoding="utf-8") as f:
+            _cache[cache_key] = f.read()
+    return _cache[cache_key]
+
+
+def get_bucket_client():
+    cache_key = "bucket_client"
+    if cache_key in _cache:
+        return _cache[cache_key]
+
+    endpoint = os.environ.get("ENDPOINT")
+    access_key = os.environ.get("ACCESS_KEY_ID")
+    secret_key = os.environ.get("SECRET_ACCESS_KEY")
+    region = os.environ.get("REGION", "auto")
+
+    if not (endpoint and access_key and secret_key):
+        _cache[cache_key] = None
+        return None
+
+    _cache[cache_key] = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name=region,
+    )
+    return _cache[cache_key]
+
+
+def load_geojson_from_bucket(object_key):
+    cache_key = f"bucket_geojson:{object_key}"
+    if cache_key not in _cache:
+        bucket_name = os.environ.get("BUCKET")
+        client = get_bucket_client()
+        if not bucket_name or client is None:
+            raise RuntimeError("Railway bucket credentials are not configured.")
+        response = client.get_object(Bucket=bucket_name, Key=object_key)
+        body = response["Body"].read()
+        _cache[cache_key] = body.decode("utf-8")
+    return _cache[cache_key]
+
+
+def get_counties_cache():
+    if "counties_payload" in _cache:
+        return _cache["counties_payload"]
+
+    use_bucket = os.environ.get("USE_BUCKET_DATA", "1").lower() in {"1", "true", "yes"}
+    bucket_key = os.environ.get("BOUNDARY_MERGED_KEY", "boundaries/current/l2_scored_merged.geojson")
+    manifest_key = os.environ.get("BOUNDARY_MANIFEST_KEY", "boundaries/current/l2_scored_manifest.json")
+
+    source = "local"
+    manifest = None
+    payload_text = None
+    parsed = None
+
+    if use_bucket:
+        try:
+            payload_text = load_geojson_from_bucket(bucket_key)
+            parsed = json.loads(payload_text)
+            try:
+                manifest = json.loads(load_geojson_from_bucket(manifest_key))
+            except Exception:
+                manifest = None
+            source = f"bucket:{bucket_key}"
+        except Exception as exc:
+            app.logger.warning("Bucket load failed (%s), falling back to local file.", exc)
+
+    if payload_text is None:
+        payload_text = load_text_from_path(LOCAL_MERGED_PATH)
+        parsed = json.loads(payload_text)
+        try:
+            manifest = load_json_from_path(LOCAL_MANIFEST_PATH)
+        except Exception:
+            manifest = None
+        source = f"local:{LOCAL_MERGED_PATH}"
+
+    etag_value = None
+    if isinstance(manifest, dict):
+        etag_value = manifest.get("sha256")
+    if not etag_value:
+        etag_value = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+    etag = f"\"{etag_value}\""
+
+    feature_count = len(parsed.get("features", [])) if isinstance(parsed, dict) else 0
+    cache_entry = {
+        "payload_text": payload_text,
+        "etag": etag,
+        "feature_count": feature_count,
+        "source": source,
+    }
+    _cache["counties_payload"] = cache_entry
+    app.logger.info("Loaded counties payload: source=%s features=%s", source, feature_count)
+    return cache_entry
 
 
 HTML = """
@@ -126,7 +215,7 @@ HTML = """
     <div class="loading" id="loading">Loading map data...</div>
 
     <div class="info-panel">
-        <h1>Data Center Suitability</h1>
+        <h1>Where oh Where do I put my 7 Trillion dollars in data centers?</h1>
         <p>Heatmap of scored regions &mdash; hover for details</p>
     </div>
 
@@ -283,7 +372,27 @@ def index():
 
 @app.route("/api/counties")
 def counties():
-    return jsonify(load_scored_boundaries())
+    cache = get_counties_cache()
+    etag = cache["etag"]
+    if request.headers.get("If-None-Match") == etag:
+        return Response(
+            status=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "public, max-age=300, stale-while-revalidate=86400",
+            },
+        )
+
+    return Response(
+        cache["payload_text"],
+        mimetype="application/json",
+        headers={
+            "ETag": etag,
+            "Cache-Control": "public, max-age=300, stale-while-revalidate=86400",
+            "X-Feature-Count": str(cache["feature_count"]),
+            "X-Data-Source": cache["source"],
+        },
+    )
 
 
 if __name__ == "__main__":

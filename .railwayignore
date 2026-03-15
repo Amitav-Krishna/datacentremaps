@@ -1,0 +1,5 @@
+# Exclude local agent metadata.
+.agents/
+
+# Exclude heavy raw data from upload.
+data/**
