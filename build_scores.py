@@ -3,42 +3,36 @@ Pre-process real data into county scores and bake into the GeoJSON.
 Factors:
   1. Electricity price (state-level industrial rate, EIA) — lower is better
   2. Land cost (county-level median home value, Census ACS) — lower is better
+  3. Permitting ease (county-level building permits per capita, Census BPS) — higher is better
+  4. Regulatory freedom (state-level, Cato Freedom in the 50 States) — higher is better
 
 Output: counties_scored.geojson with a 'score' property per feature.
 """
 import json
 import os
+import csv
 import openpyxl
 
 # --- 1. Load electricity prices (state-level, industrial) ---
 wb = openpyxl.load_workbook("eia_avgprice.xlsx")
 ws = wb.active
 
-# Find most recent year
 years = set()
 for row in ws.iter_rows(min_row=2, values_only=True):
     if row[2] == "Total Electric Industry":
         years.add(row[0])
 latest_year = max(years)
 
-# state abbreviation -> industrial price (cents/kWh)
 state_power_price = {}
 for row in ws.iter_rows(min_row=2, values_only=True):
-    if row[0] == latest_year and row[2] == "Total Electric Industry" and row[1] not in ("US", "DC"):
+    if row[0] == latest_year and row[2] == "Total Electric Industry" and row[1] != "US":
         state_abbr = row[1]
         price = row[5]  # Industrial column
         if isinstance(price, (int, float)):
             state_power_price[state_abbr] = price
 
-# DC special case
-for row in ws.iter_rows(min_row=2, values_only=True):
-    if row[0] == latest_year and row[2] == "Total Electric Industry" and row[1] == "DC":
-        if isinstance(row[5], (int, float)):
-            state_power_price["DC"] = row[5]
-
 print(f"Loaded electricity prices for {len(state_power_price)} states (year {latest_year})")
 
-# State FIPS -> state abbreviation mapping
 FIPS_TO_ABBR = {
     "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA",
     "08": "CO", "09": "CT", "10": "DE", "11": "DC", "12": "FL",
@@ -57,9 +51,8 @@ FIPS_TO_ABBR = {
 with open("census_home_values.json") as f:
     census_data = json.load(f)
 
-# FIPS (state+county) -> median home value
 county_home_value = {}
-for row in census_data[1:]:  # skip header
+for row in census_data[1:]:
     name, value, state_fips, county_fips = row
     fips = state_fips + county_fips
     if value and value != "null":
@@ -67,18 +60,99 @@ for row in census_data[1:]:  # skip header
 
 print(f"Loaded home values for {len(county_home_value)} counties")
 
-# --- 3. Normalize to 0-100 scores (lower cost = higher score) ---
+# --- 3. Load building permits (county-level) ---
+county_permits = {}
+with open("data/permitting/bps_annual.txt") as f:
+    for i, line in enumerate(f):
+        if i < 2 or not line.strip():
+            continue
+        parts = line.split(",")
+        if len(parts) < 8:
+            continue
+        state_fips = parts[1].strip().zfill(2)
+        county_fips = parts[2].strip().zfill(3)
+        fips = state_fips + county_fips
+        try:
+            total_units = int(parts[7].strip())  # 1-unit buildings
+            county_permits[fips] = county_permits.get(fips, 0) + total_units
+        except (ValueError, IndexError):
+            pass
+
+# Load population for per-capita
+county_pop = {}
+with open("data/permitting/county_population.json") as f:
+    pop_data = json.load(f)
+for row in pop_data[1:]:
+    name, pop, state_fips, county_fips = row
+    fips = state_fips + county_fips
+    if pop and pop != "null":
+        county_pop[fips] = int(pop)
+
+# Compute permits per 1000 people
+county_permits_pc = {}
+for fips, permits in county_permits.items():
+    if fips in county_pop and county_pop[fips] > 0:
+        county_permits_pc[fips] = permits / county_pop[fips] * 1000
+
+print(f"Loaded permits for {len(county_permits)} counties, per-capita for {len(county_permits_pc)}")
+
+# --- 4. Load regulatory freedom (state-level, Cato) ---
+STATE_NAME_TO_ABBR = {
+    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
+    "California": "CA", "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+    "Florida": "FL", "Georgia": "GA", "Hawaii": "HI", "Idaho": "ID",
+    "Illinois": "IL", "Indiana": "IN", "Iowa": "IA", "Kansas": "KS",
+    "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD",
+    "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS",
+    "Missouri": "MO", "Montana": "MT", "Nebraska": "NE", "Nevada": "NV",
+    "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY",
+    "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK",
+    "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+    "Vermont": "VT", "Virginia": "VA", "Washington": "WA", "West Virginia": "WV",
+    "Wisconsin": "WI", "Wyoming": "WY",
+}
+
+wb_cato = openpyxl.load_workbook("freedominthe50states.xlsx", data_only=True)
+ws_cato = wb_cato["Overall"]
+
+# Get most recent regulatory score per state
+state_reg_score = {}
+for r in range(2, ws_cato.max_row + 1):
+    state_name = ws_cato.cell(r, 1).value
+    year = ws_cato.cell(r, 2).value
+    reg_score = ws_cato.cell(r, 5).value  # Regulatory Policy column
+    if state_name and year and reg_score is not None:
+        abbr = STATE_NAME_TO_ABBR.get(state_name)
+        if abbr:
+            if abbr not in state_reg_score or year > state_reg_score[abbr][0]:
+                state_reg_score[abbr] = (year, reg_score)
+
+# Extract just the scores
+state_reg = {k: v[1] for k, v in state_reg_score.items()}
+print(f"Loaded regulatory scores for {len(state_reg)} states")
+
+# --- 5. Normalize to 0-100 scores ---
 power_prices = list(state_power_price.values())
 power_min, power_max = min(power_prices), max(power_prices)
 
 home_values = [v for v in county_home_value.values() if v > 0]
-home_min, home_max = min(home_values), max(home_values)
-# Use 95th percentile as max to avoid outliers squishing everything
 home_values_sorted = sorted(home_values)
+home_min = min(home_values)
 home_p95 = home_values_sorted[int(len(home_values_sorted) * 0.95)]
 
+permits_vals = [v for v in county_permits_pc.values() if v > 0]
+permits_sorted = sorted(permits_vals)
+permits_min = min(permits_vals)
+permits_p95 = permits_sorted[int(len(permits_sorted) * 0.95)]
+
+reg_vals = list(state_reg.values())
+reg_min, reg_max = min(reg_vals), max(reg_vals)
+
 print(f"Power price range: {power_min} - {power_max} cents/kWh")
-print(f"Home value range: ${home_min:,} - ${home_max:,} (p95: ${home_p95:,})")
+print(f"Home value range: ${home_min:,} - ${int(home_p95):,} (p95)")
+print(f"Permits/1k pop range: {permits_min:.2f} - {permits_p95:.2f} (p95)")
+print(f"Regulatory score range: {reg_min:.3f} - {reg_max:.3f}")
 
 
 def normalize_inverse(value, vmin, vmax):
@@ -89,16 +163,28 @@ def normalize_inverse(value, vmin, vmax):
     return 100 * (1 - (clamped - vmin) / (vmax - vmin))
 
 
-# --- 4. Load GeoJSON and compute scores ---
+def normalize(value, vmin, vmax):
+    """Higher value = higher score (0-100)."""
+    if vmax == vmin:
+        return 50
+    clamped = max(vmin, min(vmax, value))
+    return 100 * (clamped - vmin) / (vmax - vmin)
+
+
+# --- 5. Load GeoJSON and compute scores ---
 with open("counties.geojson") as f:
     geojson = json.load(f)
 
-WEIGHT_POWER = 0.5
-WEIGHT_LAND = 0.5
+WEIGHT_POWER = 0.30
+WEIGHT_LAND = 0.25
+WEIGHT_PERMITS = 0.25
+WEIGHT_REG = 0.20
 
 scored = 0
 missing_power = 0
 missing_land = 0
+missing_permits = 0
+missing_reg = 0
 
 for feature in geojson["features"]:
     props = feature["properties"]
@@ -121,24 +207,51 @@ for feature in geojson["features"]:
     else:
         missing_land += 1
 
-    # Combined score
-    if power_score is not None and land_score is not None:
-        score = WEIGHT_POWER * power_score + WEIGHT_LAND * land_score
-    elif power_score is not None:
-        score = power_score
-    elif land_score is not None:
-        score = land_score
+    # Permits score (higher permits per capita = easier permitting)
+    permit_score = None
+    if fips in county_permits_pc:
+        permit_score = normalize(county_permits_pc[fips], permits_min, permits_p95)
     else:
-        score = 50  # neutral fallback
+        missing_permits += 1
+
+    # Regulatory freedom score (higher = less regulation = better)
+    reg_score_val = None
+    if state_abbr and state_abbr in state_reg:
+        reg_score_val = normalize(state_reg[state_abbr], reg_min, reg_max)
+    else:
+        missing_reg += 1
+
+    # Weighted average of available scores
+    scores = []
+    weights = []
+    if power_score is not None:
+        scores.append(power_score)
+        weights.append(WEIGHT_POWER)
+    if land_score is not None:
+        scores.append(land_score)
+        weights.append(WEIGHT_LAND)
+    if permit_score is not None:
+        scores.append(permit_score)
+        weights.append(WEIGHT_PERMITS)
+    if reg_score_val is not None:
+        scores.append(reg_score_val)
+        weights.append(WEIGHT_REG)
+
+    if weights:
+        total_weight = sum(weights)
+        score = sum(s * w for s, w in zip(scores, weights)) / total_weight
+    else:
+        score = 50
 
     props["score"] = round(score, 1)
     props["power_price"] = state_power_price.get(state_abbr) if state_abbr else None
     props["home_value"] = county_home_value.get(fips)
+    props["permits_pc"] = round(county_permits_pc[fips], 2) if fips in county_permits_pc else None
+    props["reg_freedom"] = round(state_reg[state_abbr], 3) if (state_abbr and state_abbr in state_reg) else None
     scored += 1
 
 print(f"\nScored {scored} counties")
-print(f"Missing power data: {missing_power}")
-print(f"Missing land data: {missing_land}")
+print(f"Missing: power={missing_power}, land={missing_land}, permits={missing_permits}, reg={missing_reg}")
 
 with open("counties_scored.geojson", "w") as f:
     json.dump(geojson, f)

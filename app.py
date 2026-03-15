@@ -111,7 +111,7 @@ HTML = """
 
     <div class="info-panel">
         <h1>Data Centre Suitability</h1>
-        <p>Heatmap &mdash; USA, Canada, Mexico, China</p>
+        <p>Heatmap of the USA by county &mdash; hover for details</p>
     </div>
 
     <div class="legend">
@@ -134,10 +134,12 @@ HTML = """
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         const map = L.map('map', {
-            center: [35.0, -30.0],
-            zoom: 3,
+            center: [39.0, -96.0],
+            zoom: 5,
             zoomControl: false,
-            worldCopyJump: true
+            maxBounds: [[24, -130], [50, -65]],
+            maxBoundsViscosity: 1.0,
+            minZoom: 4
         });
 
         L.control.zoom({ position: 'bottomright' }).addTo(map);
@@ -204,32 +206,19 @@ HTML = """
                         const props = feature.properties;
                         hoverInfo.style.display = 'block';
 
-                        // Build name based on what properties exist
-                        const country = props.COUNTRY || 'USA';
-                        const region = props.STATE || '';
-                        const name = props.NAME || '';
-                        if (country === 'USA' || !props.COUNTRY) {
-                            hoverLoc.textContent = name + ' County';
-                            hoverCounty.textContent = 'FIPS: ' + (props.STATE||'') + (props.COUNTY||'');
-                        } else {
-                            hoverLoc.textContent = name;
-                            hoverCounty.textContent = region + ', ' + country;
-                        }
+                        hoverLoc.textContent = (props.NAME || '') + ' County';
+                        hoverCounty.textContent = 'FIPS: ' + (props.STATE||'') + (props.COUNTY||'');
 
                         hoverScore.textContent = props.score + '/100';
                         hoverScore.style.color = scoreToColor(props.score);
                         hoverLabel.textContent = scoreToLabel(props.score);
 
-                        let details = '';
-                        if (props.power_price != null) {
-                            details += 'Power: ' + props.power_price + ' ¢/kWh (industrial)<br>';
-                        }
-                        if (props.home_value != null) {
-                            details += 'Median home: $' + props.home_value.toLocaleString();
-                        }
-                        if (!details && props.COUNTRY) {
-                            details = 'Data not yet available';
-                        }
+                        let lines = [];
+                        lines.push('Power: ' + (props.power_price != null ? props.power_price + ' ¢/kWh (industrial)' : 'data not found'));
+                        lines.push('Median home: ' + (props.home_value != null ? '$' + props.home_value.toLocaleString() : 'data not found'));
+                        lines.push('Permits/1k pop: ' + (props.permits_pc != null ? props.permits_pc : 'data not found'));
+                        lines.push('Regulatory freedom: ' + (props.reg_freedom != null ? props.reg_freedom : 'data not found'));
+                        var details = lines.length ? lines.join('<br>') : '';
                         hoverDetails.innerHTML = details;
                     });
                     layer.on('mouseout', function(e) {
@@ -241,21 +230,12 @@ HTML = """
             }).addTo(map);
         }
 
-        // Load all regions in parallel
-        const regions = ['/api/regions/us', '/api/regions/can', '/api/regions/mex', '/api/regions/chn'];
-        let loaded = 0;
-
-        regions.forEach(url => {
-            fetch(url)
-                .then(r => r.json())
-                .then(geojson => {
-                    addRegionLayer(geojson);
-                    loaded++;
-                    if (loaded === regions.length) {
-                        loading.style.display = 'none';
-                    }
-                });
-        });
+        fetch('/api/counties')
+            .then(r => r.json())
+            .then(geojson => {
+                addRegionLayer(geojson);
+                loading.style.display = 'none';
+            });
 
         // Hide layers while panning for performance
         var pane = map.getPane('overlayPane');
@@ -276,24 +256,9 @@ def index():
     return render_template_string(HTML)
 
 
-@app.route("/api/regions/us")
-def regions_us():
+@app.route("/api/counties")
+def counties():
     return jsonify(load_geojson("counties_scored.geojson"))
-
-
-@app.route("/api/regions/can")
-def regions_can():
-    return jsonify(load_geojson("data/boundaries/can_scored.geojson"))
-
-
-@app.route("/api/regions/mex")
-def regions_mex():
-    return jsonify(load_geojson("data/boundaries/mex_scored.geojson"))
-
-
-@app.route("/api/regions/chn")
-def regions_chn():
-    return jsonify(load_geojson("data/boundaries/chn_scored.geojson"))
 
 
 if __name__ == "__main__":

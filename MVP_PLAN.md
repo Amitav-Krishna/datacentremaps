@@ -1,9 +1,9 @@
 priorities for next 10 minutes:
-1. simple heuristic for regulation speed.  Find a good heuristic for time to break ground
+1. Add simple heuristic for regulation speed as input to suitability score.  Find a good heuristic for time to break ground.  Add this a
    1. number of zoning laws
    2. Average time to zone a proprety
-2. add an overlay of internet fibre cables, add that as a score of speed of fibre available in that county.  
-3. Add toggles for different data sources on the 
+2. add an overlay of internet fibre cables, add that as a score of speed of fibre available in that county to the final suitability score
+3. Add toggles for different data sources on the bottom
 1. add canada, mexico, and china
   - Reach: europe, south america, asia, africa
 3. Location of existing data centres
