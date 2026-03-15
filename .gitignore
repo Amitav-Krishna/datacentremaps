@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+
+# Data files (large, downloaded/generated)
+*.geojson
+*.xlsx
+*.json
+data/
+
+# Editor backups
+*~
+*.swp

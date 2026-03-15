@@ -387,7 +387,7 @@ def index():
 
 @app.route("/api/counties")
 def counties():
-    return jsonify(load_geojson("counties_scored.geojson"))
+    return jsonify(load_geojson("data/counties_scored.geojson"))
 
 
 @app.route("/api/fibre")

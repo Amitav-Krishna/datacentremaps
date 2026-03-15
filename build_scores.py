@@ -14,7 +14,7 @@ import csv
 import openpyxl
 
 # --- 1. Load electricity prices (state-level, industrial) ---
-wb = openpyxl.load_workbook("eia_avgprice.xlsx")
+wb = openpyxl.load_workbook("data/eia_avgprice.xlsx")
 ws = wb.active
 
 years = set()
@@ -48,7 +48,7 @@ FIPS_TO_ABBR = {
 }
 
 # --- 2. Load land costs (county-level median home value) ---
-with open("census_home_values.json") as f:
+with open("data/census_home_values.json") as f:
     census_data = json.load(f)
 
 county_home_value = {}
@@ -113,7 +113,7 @@ STATE_NAME_TO_ABBR = {
     "Wisconsin": "WI", "Wyoming": "WY",
 }
 
-wb_cato = openpyxl.load_workbook("freedominthe50states.xlsx", data_only=True)
+wb_cato = openpyxl.load_workbook("data/freedominthe50states.xlsx", data_only=True)
 ws_cato = wb_cato["Overall"]
 
 # Get most recent regulatory score per state
@@ -188,7 +188,7 @@ def normalize(value, vmin, vmax):
 
 
 # --- 7. Load GeoJSON and compute scores ---
-with open("counties.geojson") as f:
+with open("data/counties.geojson") as f:
     geojson = json.load(f)
 
 WEIGHT_POWER = 0.25
@@ -268,7 +268,7 @@ for feature in geojson["features"]:
 print(f"\nScored {scored} counties")
 print(f"Missing: power={missing_power}, land={missing_land}, permits={missing_permits}, reg={missing_reg}, broadband={missing_bb}")
 
-with open("counties_scored.geojson", "w") as f:
+with open("data/counties_scored.geojson", "w") as f:
     json.dump(geojson, f)
 
-print(f"Written to counties_scored.geojson ({os.path.getsize('counties_scored.geojson') / 1e6:.1f} MB)")
+print(f"Written to data/counties_scored.geojson ({os.path.getsize('data/counties_scored.geojson') / 1e6:.1f} MB)")
