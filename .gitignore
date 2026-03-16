@@ -1,5 +1,6 @@
 # Keep repository lean: ignore raw/intermediate data files.
 data/**
+node_modules/
 
 # Keep runtime-scored boundary datasets tracked for the app.
 !data/
